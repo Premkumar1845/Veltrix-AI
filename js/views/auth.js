@@ -5,9 +5,17 @@ export function renderAuth(root) {
   root.innerHTML = `
   <div class="auth-page">
     <form class="auth-box" id="authForm">
-      <div class="wordmark" style="justify-content:center;margin-bottom:24px">${LOGO}Veltrix AI</div>
+      <div class="auth-logo-wrap">
+        ${LOGO}
+        <div class="wordmark-text">Veltrix AI</div>
+      </div>
       <h2>Welcome back</h2>
       <p>Sign in to access your intelligent inbox.</p>
+      
+      <div id="usernameWrap" class="is-hidden">
+        <label for="username">Username</label>
+        <input id="username" type="text" placeholder="johndoe" autocomplete="username">
+      </div>
       
       <label for="email">Email address</label>
       <input id="email" type="email" placeholder="you@example.com" required autocomplete="email">
@@ -31,6 +39,8 @@ export function renderAuth(root) {
   const form = $('#authForm');
   const emailInput = $('#email');
   const passInput = $('#password');
+  const usernameWrap = $('#usernameWrap');
+  const usernameInput = $('#username');
   const errText = $('#authErr');
   const submitBtn = $('#submitBtn');
   const toggleBtn = $('#toggleBtn');
@@ -57,6 +67,7 @@ export function renderAuth(root) {
       submitBtn.textContent = 'Sign Up';
       toggleText.textContent = 'Already have an account?';
       toggleBtn.textContent = 'Sign in';
+      usernameWrap.classList.remove('is-hidden');
     } else {
       mode = 'signIn';
       title.textContent = 'Welcome back';
@@ -64,6 +75,7 @@ export function renderAuth(root) {
       submitBtn.textContent = 'Sign In';
       toggleText.textContent = "Don't have an account?";
       toggleBtn.textContent = 'Sign up';
+      usernameWrap.classList.add('is-hidden');
     }
   };
 
@@ -72,6 +84,7 @@ export function renderAuth(root) {
     clearErr();
     const email = emailInput.value.trim();
     const pass = passInput.value;
+    const username = usernameInput.value.trim();
 
     if (!email || !pass) {
       fail('Please enter both email and password.');
@@ -85,9 +98,10 @@ export function renderAuth(root) {
       if (mode === 'signIn') {
         await signIn(email, pass);
       } else {
-        await signUp(email, pass);
-        // Supabase sign up might require email confirmation, 
-        // but for now, we'll try to just reload.
+        if (!username) {
+          throw new Error('Please enter a username.');
+        }
+        await signUp(email, pass, username);
       }
       
       // Reload the app to re-run the main.js boot logic
