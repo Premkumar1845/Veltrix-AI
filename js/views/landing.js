@@ -1,12 +1,34 @@
 import { $, esc, LOGO } from '../utils.js';
 import { gate } from './gate.js';
+import { getSession, signOut } from '../supabase.js';
+import { initials } from '../utils.js';
 
-export function renderLanding(root) {
+export async function renderLanding(root) {
+  // Fetch Supabase session to display username
+  let username = '';
+  let avatarText = '?';
+  try {
+    const session = await getSession();
+    if (session) {
+      username = session.user?.user_metadata?.username
+        || session.user?.email?.split('@')[0]
+        || '';
+      avatarText = initials(username.replace(/[._\-+]/g, ' ')) || '?';
+    }
+  } catch (_) {}
+
   root.innerHTML = `
   <div id="landing">
     <nav class="lnav">
       <div class="wordmark">${LOGO}Veltrix AI</div>
-      <button class="ghost-btn" id="navConnect">Connect Gmail</button>
+      <div style="display:flex;align-items:center;gap:12px">
+        ${username ? `
+          <span style="font-size:14px;font-weight:600;color:var(--ink)">Hi, ${esc(username)}</span>
+          <div class="avatar" style="width:32px;height:32px;font-size:13px" title="${esc(username)}">${esc(avatarText)}</div>
+          <button class="ghost-btn" id="landingLogoutBtn" style="color:var(--bad);border-color:var(--bad)">Logout</button>
+        ` : ''}
+        <button class="ghost-btn" id="navConnect">Connect Gmail</button>
+      </div>
     </nav>
     <section class="hero">
       <div>
@@ -55,4 +77,16 @@ export function renderLanding(root) {
   </div>`;
 
   $('#navConnect').onclick = $('#ctaConnect').onclick = () => gate(root);
+
+  const logoutBtn = $('#landingLogoutBtn');
+  if (logoutBtn) {
+    logoutBtn.onclick = async () => {
+      try {
+        await signOut();
+        location.reload();
+      } catch (e) {
+        console.error('Logout failed', e);
+      }
+    };
+  }
 }
