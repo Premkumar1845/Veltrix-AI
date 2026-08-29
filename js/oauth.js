@@ -25,15 +25,12 @@ export function token() { return tokenInfo?.access_token || null; }
 export function isAuthed() { return !!(tokenInfo && tokenInfo.expires_at > Date.now() + 5000); }
 export function msUntilExpiry() { return tokenInfo ? Math.max(0, tokenInfo.expires_at - Date.now()) : 0; }
 
-// Explicit, stable redirect URI — avoids mismatch when running behind Vercel rewrites
-// or when location.pathname is anything other than '/'.
+// Use location.origin — always the protocol+host with no trailing slash.
+// Register THIS exact value in Google Cloud Console → Authorized Redirect URIs.
 function redirectUri() {
-  const { hostname } = location;
-  if (hostname === 'localhost' || hostname === '127.0.0.1') {
-    return `${location.protocol}//${location.host}`;
-  }
-  // Production — always use the canonical Vercel origin, no trailing slash.
-  return 'https://veltrix-ai-nxtwave.vercel.app';
+  const uri = location.origin;
+  console.log('[Veltrix OAuth] redirect_uri being used:', uri);
+  return uri;
 }
 
 export async function connect(clientId) {
