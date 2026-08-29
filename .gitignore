@@ -5,7 +5,7 @@
 .env.development
 
 # Supabase auth files
-js/supabase.js
+
 
 # Scratch/dev files
 scratch/
