@@ -24,32 +24,25 @@ export function leaveApp(message) {
 (async function init() {
   // Check for active Supabase user session
   const session = await getSession();
-  
+
   if (!session) {
     // If no Supabase session, user must sign in/up first
     renderAuth(root);
     return;
   }
 
-  // Supabase authenticated, now proceed with the Google OAuth flow
+  // Supabase authenticated — handle Google OAuth redirect callback
   try {
     if (await handleRedirect()) {
       await enterApp();
       return;
     }
   } catch (e) {
-    // Show the reason on the connect screen rather than dropping the user on a
-    // blank gate with no explanation.
     console.warn('OAuth callback error:', e.message);
     gate(root, e.message);
     return;
   }
 
-  if (config.demoMode) {
-    await enterApp();
-    return;
-  }
-  
-  // Show landing/gate page to connect Gmail
-  renderLanding(root);
+  // Always return to the landing page (Connect Gmail) after sign-in
+  await renderLanding(root);
 })();
