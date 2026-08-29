@@ -1,3 +1,4 @@
+import { getSession, signOut } from '../supabase.js';
 import { store } from '../store.js';
 import { config } from '../config.js';
 import { $, $$, initials, debounce, toast, LOGO } from '../utils.js';
@@ -45,8 +46,12 @@ export function renderShell(root) {
       <button class="icon-btn" id="themeBtn" aria-label="Toggle theme">
         <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
       </button>
-      <div class="avatar" id="userAv" title="Account">?</div>
-      <button class="btn-primary desktop-only" id="composeBtn" style="padding:8px 16px;font-size:13px">Compose</button>
+      <div class="topbar-user" style="display:flex;align-items:center;gap:12px">
+        <span class="username-display" id="userNameDisp" style="font-weight:600;font-size:14px;color:var(--ink)"></span>
+        <div class="avatar" id="userAv" title="Account">?</div>
+      </div>
+      <button class="btn-outline desktop-only" id="topLogoutBtn" style="padding:6px 12px;font-size:12px;margin-left:12px">Logout</button>
+      <button class="btn-primary desktop-only" id="composeBtn" style="padding:8px 16px;font-size:13px;margin-left:12px">Compose</button>
     </header>
     <div class="main">
       <nav class="sidebar" id="sidebar" aria-label="Folders">
@@ -162,19 +167,49 @@ export function renderShell(root) {
   }
 
   /* ---- account ---- */
+  const userAv = $('#userAv');
+  const userNameDisp = $('#userNameDisp');
+  const topLogoutBtn = $('#topLogoutBtn');
+
+  // Pull username from Supabase session metadata
+  getSession().then(session => {
+    if (session) {
+      const username = session.user?.user_metadata?.username 
+        || session.user?.email?.split('@')[0] 
+        || 'User';
+      userNameDisp.textContent = username;
+      userAv.title = session.user?.email || 'Account';
+      userAv.textContent = initials(username.replace(/[._\-+]/g, ' '));
+    }
+  }).catch(() => {});
+
   if (config.demoMode) {
-    $('#userAv').textContent = 'DM';
-    $('#userAv').title = 'Demo mode';
+    userAv.textContent = 'DM';
+    userAv.title = 'Demo mode';
+    userNameDisp.textContent = 'Demo';
   } else {
     fetchProfile()
       .then(p => {
         store.set({ profile: p });
-        const local = (p.emailAddress || '?').split('@')[0];
-        $('#userAv').textContent = initials(local.replace(/[._\-+]/g, ' '));
-        $('#userAv').title = p.emailAddress || 'Account';
+        // Only overwrite avatar if Supabase username didn't set it
+        if (!userAv.textContent || userAv.textContent === '?') {
+          const local = (p.emailAddress || '?').split('@')[0];
+          userAv.textContent = initials(local.replace(/[._\-+]/g, ' '));
+          userAv.title = p.emailAddress || 'Account';
+        }
       })
-      .catch(() => { $('#userAv').textContent = '?'; });
+      .catch(() => { if (!userAv.textContent) userAv.textContent = '?'; });
   }
+
+  // Logout button
+  topLogoutBtn.onclick = async () => {
+    try {
+      await signOut();
+      location.reload();
+    } catch (e) {
+      toast('Failed to sign out.', 'err');
+    }
+  };
 
   store.subscribe(() => paintNav());
   paintNav();
