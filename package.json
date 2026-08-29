@@ -1,0 +1,10 @@
+{
+  "name": "veltrix-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Veltrix AI — Intelligent Email Assistant (static SPA)",
+  "scripts": {
+    "dev": "npx -y serve . -l 3000",
+    "start": "npx -y serve . -l 3000"
+  }
+}
