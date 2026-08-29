@@ -4,7 +4,6 @@ let tokenInfo = null; // { access_token, expires_at } — memory only, never loc
 let profileCache = null;
 
 const SS = {
-  verifier: 'veltrix.codeVerifier',
   state:    'veltrix.oauthState',
   clientId: 'veltrix.pendingClientId',
 };
@@ -13,40 +12,32 @@ const b64u = buf =>
   btoa(String.fromCharCode(...new Uint8Array(buf)))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-const rand = (n = 32) => b64u(crypto.getRandomValues(new Uint8Array(n)));
-
-async function pkcePair() {
-  const verifier = rand(32);
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
-  return { verifier, challenge: b64u(digest) };
-}
+const rand = (n = 16) => b64u(crypto.getRandomValues(new Uint8Array(n)));
 
 export function token() { return tokenInfo?.access_token || null; }
 export function isAuthed() { return !!(tokenInfo && tokenInfo.expires_at > Date.now() + 5000); }
 export function msUntilExpiry() { return tokenInfo ? Math.max(0, tokenInfo.expires_at - Date.now()) : 0; }
 
-// Use location.origin — always the protocol+host with no trailing slash.
-// Register THIS exact value in Google Cloud Console → Authorized Redirect URIs.
+// location.origin is always protocol+host with no trailing slash.
+// Register this EXACT string in Google Cloud Console → Authorized Redirect URIs.
 function redirectUri() {
-  const uri = location.origin;
-  console.log('[Veltrix OAuth] redirect_uri being used:', uri);
-  return uri;
+  return location.origin;
 }
 
+/**
+ * Start the Implicit Grant flow.
+ * Google returns the access token directly in the URL hash — no backend, no client_secret needed.
+ */
 export async function connect(clientId) {
-  const { verifier, challenge } = await pkcePair();
   const state = rand(16);
-  sessionStorage.setItem(SS.verifier, verifier);
   sessionStorage.setItem(SS.state, state);
   sessionStorage.setItem(SS.clientId, clientId);
 
   const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   url.searchParams.set('client_id', clientId);
   url.searchParams.set('redirect_uri', redirectUri());
-  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('response_type', 'token');   // Implicit flow — token returned in hash
   url.searchParams.set('scope', config.scopes);
-  url.searchParams.set('code_challenge', challenge);
-  url.searchParams.set('code_challenge_method', 'S256');
   url.searchParams.set('state', state);
   url.searchParams.set('include_granted_scopes', 'true');
   url.searchParams.set('prompt', 'consent');
@@ -57,88 +48,70 @@ function clearPending() {
   Object.values(SS).forEach(k => sessionStorage.removeItem(k));
 }
 
+/**
+ * Handle Google's implicit flow redirect.
+ * The access token arrives in location.hash, NOT location.search.
+ */
 export async function handleRedirect() {
-  const p = new URLSearchParams(location.search);
-  const code = p.get('code');
-  const err  = p.get('error');
+  // Check URL hash first (implicit flow returns #access_token=...&expires_in=...)
+  const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const accessToken = hash.get('access_token');
+  const expiresIn   = hash.get('expires_in');
+  const hashError   = hash.get('error');
 
-  if (!code && !err) return false;
+  // Also check query string for error codes (redirect_uri_mismatch etc.)
+  const query = new URLSearchParams(location.search);
+  const queryError = query.get('error');
+  const hasActivity = accessToken || hashError || queryError;
 
-  // Clean up the URL immediately so a reload doesn't re-trigger this.
+  if (!hasActivity) return false;
+
+  // Clean URL immediately
   history.replaceState({}, '', location.pathname);
 
+  const err = hashError || queryError;
   if (err) {
     clearPending();
-    const msg = err === 'access_denied'
+    throw new Error(err === 'access_denied'
       ? 'Access was declined at the Google consent screen.'
-      : `Google returned an error: ${err}`;
-    throw new Error(msg);
+      : `Google returned: ${err}`);
   }
 
   const expected = sessionStorage.getItem(SS.state);
-  const verifier = sessionStorage.getItem(SS.verifier);
+  const returnedState = hash.get('state');
   const clientId = sessionStorage.getItem(SS.clientId) || config.clientId;
   clearPending();
 
-  if (!expected || p.get('state') !== expected) {
-    throw new Error('OAuth state mismatch — this sign-in did not originate from this tab. Please try again.');
+  if (!expected || returnedState !== expected) {
+    throw new Error('OAuth state mismatch — please try connecting again.');
   }
-  if (!verifier) {
-    throw new Error('Sign-in session was lost. Please click "Connect Gmail" again.');
-  }
-  if (!clientId) {
-    throw new Error('Missing Google OAuth Client ID. Check js/config.js.');
+  if (!accessToken) {
+    throw new Error('Google did not return an access token. Please try again.');
   }
   if (clientId !== config.clientId) setClientId(clientId);
 
-  // Exchange authorization code for an access token.
-  let res;
-  try {
-    res = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        code,
-        client_id: clientId,
-        redirect_uri: redirectUri(),
-        grant_type: 'authorization_code',
-        code_verifier: verifier,
-      }),
-    });
-  } catch (networkErr) {
-    throw new Error('Network error during token exchange. Check your internet connection.');
-  }
-
-  if (!res.ok) {
-    let detail = {};
-    try { detail = await res.json(); } catch (_) {}
-    const msg = detail.error_description || detail.error || `Token exchange failed (HTTP ${res.status})`;
-    throw new Error(msg);
-  }
-
-  const tok = await res.json();
-  if (!tok.access_token) throw new Error('Google did not return an access token. Please try again.');
-
   tokenInfo = {
-    access_token: tok.access_token,
-    expires_at:   Date.now() + (tok.expires_in || 3600) * 1000,
+    access_token: accessToken,
+    expires_at:   Date.now() + (parseInt(expiresIn, 10) || 3600) * 1000,
   };
   profileCache = null;
 
-  // Validate the token with Gmail immediately — surfaces invalid_grant and
-  // scope errors before the user reaches the inbox.
+  // Immediately validate with Gmail API
   try {
     const check = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
-      headers: { Authorization: `Bearer ${tok.access_token}` },
+      headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (!check.ok) {
       tokenInfo = null;
       const errBody = await check.json().catch(() => ({}));
-      throw new Error(errBody?.error?.message || `Gmail API returned ${check.status}. Make sure the Gmail API is enabled in Google Cloud Console.`);
+      throw new Error(
+        errBody?.error?.message ||
+        `Gmail API returned HTTP ${check.status}. Make sure the Gmail API is enabled in Google Cloud Console.`
+      );
     }
     profileCache = await check.json();
   } catch (gmailErr) {
-    if (gmailErr.message.startsWith('Gmail API')) throw gmailErr;
+    if (tokenInfo === null) throw gmailErr; // already cleared
     throw new Error('Could not verify Gmail access: ' + gmailErr.message);
   }
 
@@ -164,7 +137,7 @@ export function disconnect() {
   profileCache = null;
   clearPending();
   if (t) {
-    // Best-effort revoke so the grant does not linger after the user signs out.
+    // Best-effort revoke
     fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(t), {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
