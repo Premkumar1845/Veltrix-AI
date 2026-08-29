@@ -38,8 +38,9 @@ export function leaveApp(message) {
       return;
     }
   } catch (e) {
-    console.warn('OAuth callback error:', e.message);
-    gate(root, e.message);
+    // Surface the real error message instead of silently going back to gate.
+    console.error('OAuth callback error:', e);
+    gate(root, e.message || 'Gmail connection failed. Please try again.');
     return;
   }
 

@@ -5,7 +5,7 @@ let profileCache = null;
 
 const SS = {
   verifier: 'veltrix.codeVerifier',
-  state: 'veltrix.oauthState',
+  state:    'veltrix.oauthState',
   clientId: 'veltrix.pendingClientId',
 };
 
@@ -25,7 +25,16 @@ export function token() { return tokenInfo?.access_token || null; }
 export function isAuthed() { return !!(tokenInfo && tokenInfo.expires_at > Date.now() + 5000); }
 export function msUntilExpiry() { return tokenInfo ? Math.max(0, tokenInfo.expires_at - Date.now()) : 0; }
 
-const redirectUri = () => location.origin + location.pathname;
+// Explicit, stable redirect URI — avoids mismatch when running behind Vercel rewrites
+// or when location.pathname is anything other than '/'.
+function redirectUri() {
+  const { hostname } = location;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return `${location.protocol}//${location.host}`;
+  }
+  // Production — always use the canonical Vercel origin, no trailing slash.
+  return 'https://veltrix-ai-nxtwave.vercel.app';
+}
 
 export async function connect(clientId) {
   const { verifier, challenge } = await pkcePair();
@@ -42,8 +51,6 @@ export async function connect(clientId) {
   url.searchParams.set('code_challenge', challenge);
   url.searchParams.set('code_challenge_method', 'S256');
   url.searchParams.set('state', state);
-  // No refresh token: a browser-only client cannot store one safely, so the
-  // session lasts as long as the access token and then asks to reconnect.
   url.searchParams.set('include_granted_scopes', 'true');
   url.searchParams.set('prompt', 'consent');
   location.assign(url.toString());
@@ -56,16 +63,19 @@ function clearPending() {
 export async function handleRedirect() {
   const p = new URLSearchParams(location.search);
   const code = p.get('code');
-  const err = p.get('error');
+  const err  = p.get('error');
 
   if (!code && !err) return false;
+
+  // Clean up the URL immediately so a reload doesn't re-trigger this.
   history.replaceState({}, '', location.pathname);
 
   if (err) {
     clearPending();
-    throw new Error(err === 'access_denied'
+    const msg = err === 'access_denied'
       ? 'Access was declined at the Google consent screen.'
-      : `Google returned an error: ${err}`);
+      : `Google returned an error: ${err}`;
+    throw new Error(msg);
   }
 
   const expected = sessionStorage.getItem(SS.state);
@@ -73,35 +83,68 @@ export async function handleRedirect() {
   const clientId = sessionStorage.getItem(SS.clientId) || config.clientId;
   clearPending();
 
-  // A mismatched or missing state means this redirect did not originate here.
-  if (!expected || p.get('state') !== expected) throw new Error('OAuth state mismatch — sign-in was not completed here.');
-  if (!verifier) throw new Error('Sign-in session was lost. Please try connecting again.');
-  if (!clientId) throw new Error('Missing OAuth Client ID.');
+  if (!expected || p.get('state') !== expected) {
+    throw new Error('OAuth state mismatch — this sign-in did not originate from this tab. Please try again.');
+  }
+  if (!verifier) {
+    throw new Error('Sign-in session was lost. Please click "Connect Gmail" again.');
+  }
+  if (!clientId) {
+    throw new Error('Missing Google OAuth Client ID. Check js/config.js.');
+  }
   if (clientId !== config.clientId) setClientId(clientId);
 
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      code,
-      client_id: clientId,
-      redirect_uri: redirectUri(),
-      grant_type: 'authorization_code',
-      code_verifier: verifier,
-    }),
-  });
+  // Exchange authorization code for an access token.
+  let res;
+  try {
+    res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: clientId,
+        redirect_uri: redirectUri(),
+        grant_type: 'authorization_code',
+        code_verifier: verifier,
+      }),
+    });
+  } catch (networkErr) {
+    throw new Error('Network error during token exchange. Check your internet connection.');
+  }
+
   if (!res.ok) {
-    const detail = await res.json().catch(() => ({}));
-    throw new Error(detail.error_description || 'Token exchange failed');
+    let detail = {};
+    try { detail = await res.json(); } catch (_) {}
+    const msg = detail.error_description || detail.error || `Token exchange failed (HTTP ${res.status})`;
+    throw new Error(msg);
   }
 
   const tok = await res.json();
-  if (!tok.access_token) throw new Error('Google did not return an access token.');
+  if (!tok.access_token) throw new Error('Google did not return an access token. Please try again.');
+
   tokenInfo = {
     access_token: tok.access_token,
-    expires_at: Date.now() + (tok.expires_in || 3600) * 1000,
+    expires_at:   Date.now() + (tok.expires_in || 3600) * 1000,
   };
   profileCache = null;
+
+  // Validate the token with Gmail immediately — surfaces invalid_grant and
+  // scope errors before the user reaches the inbox.
+  try {
+    const check = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+      headers: { Authorization: `Bearer ${tok.access_token}` },
+    });
+    if (!check.ok) {
+      tokenInfo = null;
+      const errBody = await check.json().catch(() => ({}));
+      throw new Error(errBody?.error?.message || `Gmail API returned ${check.status}. Make sure the Gmail API is enabled in Google Cloud Console.`);
+    }
+    profileCache = await check.json();
+  } catch (gmailErr) {
+    if (gmailErr.message.startsWith('Gmail API')) throw gmailErr;
+    throw new Error('Could not verify Gmail access: ' + gmailErr.message);
+  }
+
   return true;
 }
 
