@@ -9,13 +9,19 @@ export function gate(root, message = '') {
       <h2>Connect your Gmail</h2>
       <p>Sign in with Google using OAuth 2.0. Your password is never requested, and access tokens remain in browser memory only.</p>
       
+      ${message ? `
+      <div style="background:var(--bad-soft);border:1px solid var(--bad);border-radius:10px;padding:14px 16px;margin-bottom:16px">
+        <strong style="color:var(--bad);font-size:13px;display:block;margin-bottom:4px">⚠ Connection Error</strong>
+        <span style="font-size:13px;color:var(--ink)">${esc(message)}</span>
+      </div>` : ''}
+      
       <div class="scopes">
         Requested scopes (minimum needed):<br>
         <code>gmail.modify</code> read + manage mail &nbsp;·&nbsp;
         <code>gmail.send</code> send replies &nbsp;·&nbsp;
         <code>userinfo.profile</code> show your name
       </div>
-      <p class="err-text${message ? ' show' : ''}" id="gateErr">${esc(message)}</p>
+      <p class="err-text" id="gateErr"></p>
       <button type="submit" class="btn-primary btn-accent">Continue with Google</button>
       <div class="divider">or</div>
       <button type="button" class="btn-outline wide" id="demoBtn">Explore demo mode</button>
