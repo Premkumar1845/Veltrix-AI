@@ -1,5 +1,5 @@
 import { store } from '../store.js';
-import { config } from '../config.js';
+import { config, hasGeminiKey } from '../config.js';
 import { $, $$, esc, initials, fmtFull, fmtTime, parseAddr, toast } from '../utils.js';
 import * as gm from '../gmail.js';
 import * as ai from '../ai.js';
@@ -25,13 +25,20 @@ const ICON = {
   clip: '<path d="M21 11.5 12.5 20a5 5 0 0 1-7-7l8-8a3.5 3.5 0 0 1 5 5l-8 8a2 2 0 0 1-3-3l7-7"/>',
   down: '<path d="M12 4v12m0 0-4-4m4 4 4-4M4 20h16"/>',
   spark: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>',
+  retry: '<path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>',
 };
 
 export function renderReader(el, row) {
   const seq = ++renderSeq;
 
   if (!row) {
-    el.innerHTML = '<div class="empty" style="padding-top:120px"><h3>Select an email</h3><p>Choose a message from the list to read it here.</p></div>';
+    el.innerHTML = `<div class="empty" style="padding-top:120px">
+      <div class="empty-icon">
+        <svg class="i" viewBox="0 0 24 24" style="width:48px;height:48px;color:var(--ink-3);opacity:.4">${ICON.unread}</svg>
+      </div>
+      <h3>Select an email</h3>
+      <p>Choose a message from the list to read it here.</p>
+    </div>`;
     return;
   }
 
@@ -141,6 +148,12 @@ function paint(el, row, msgs) {
     </div>`;
   }).join('');
 
+  // Determine AI engine status
+  const geminiActive = hasGeminiKey();
+  const engineBadge = geminiActive
+    ? '<span class="ai-engine-badge gemini">Gemini AI</span>'
+    : '<span class="ai-engine-badge local">On-device</span>';
+
   el.innerHTML = `
   <div class="reader-inner">
     ${backBar(row)}
@@ -157,7 +170,8 @@ function paint(el, row, msgs) {
     <div class="ai-panel">
       <div class="ai-head">
         <svg class="i" viewBox="0 0 24 24" style="width:14px;height:14px">${ICON.spark}</svg>
-        AI Assistant · runs on-device
+        AI Assistant
+        ${engineBadge}
       </div>
       <div class="ai-body">
         <div class="ai-tabs" role="tablist">
@@ -306,8 +320,18 @@ function wireActions(el, row, msgs, target, email) {
 
 function wireAi(el, target, body, name, email) {
   const out = $('#aiOut', el);
+  const useGemini = hasGeminiKey();
+
   const genState = label =>
     (out.innerHTML = `<div class="gen-state"><span class="pulse"></span>${esc(label)}</div>`);
+
+  const showError = (msg, retryFn) =>
+    (out.innerHTML = `<div class="ai-out ai-error">
+      <p style="color:var(--bad);margin-bottom:8px">${esc(msg)}</p>
+      <button class="btn-outline ai-retry-btn" style="font-size:12px;padding:6px 14px">
+        <svg class="i" viewBox="0 0 24 24" style="width:13px;height:13px">${ICON.retry}</svg>Retry
+      </button>
+    </div>`);
 
   const hasText = body.trim().length > 0;
 
@@ -318,7 +342,13 @@ function wireAi(el, target, body, name, email) {
     };
   });
 
-  function runTab(tab) {
+  function engineNote(engine) {
+    return engine === 'gemini'
+      ? '<div class="disc"><svg class="i" viewBox="0 0 24 24" style="width:12px;height:12px;vertical-align:-2px"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg> Powered by Google Gemini</div>'
+      : '<div class="disc">Extracted from the email text itself using on-device analysis. For richer AI results, add a Gemini API key in Settings.</div>';
+  }
+
+  async function runTab(tab) {
     if (!hasText && tab !== 'rep') {
       out.innerHTML = '<div class="ai-out"><p>There is no readable text in this message to analyze.</p></div>';
       return;
@@ -326,40 +356,89 @@ function wireAi(el, target, body, name, email) {
 
     if (tab === 'sum') {
       genState('Analyzing email…');
-      setTimeout(() => {
+      try {
+        let s;
+        if (useGemini) {
+          s = await ai.aiSummarize(body);
+        } else {
+          await delay(300);
+          s = ai.summarize(body);
+        }
+        out.innerHTML = `<div class="ai-out">
+          <h4>Summary</h4><p>${esc(s.summary)}</p>
+          <h4>Key points</h4><ul>${(s.keyPoints || []).map(k => `<li>${esc(k)}</li>`).join('') || '<li>None extracted.</li>'}</ul>
+          <h4>Action required</h4><p>${esc(s.actionRequired)}</p>
+          ${s.deadline ? `<h4>Deadline</h4><p>${esc(s.deadline)}</p>` : ''}
+          ${engineNote(s.engine)}
+        </div>`;
+        store.logActivity('AI', 'Summary generated: ' + (target.subject || '').slice(0, 40));
+      } catch (err) {
+        // Fallback to local on Gemini failure
+        console.warn('Gemini summarize failed, using local fallback:', err.message);
         const s = ai.summarize(body);
         out.innerHTML = `<div class="ai-out">
           <h4>Summary</h4><p>${esc(s.summary)}</p>
-          <h4>Key points</h4><ul>${s.keyPoints.map(k => `<li>${esc(k)}</li>`).join('') || '<li>None extracted.</li>'}</ul>
+          <h4>Key points</h4><ul>${(s.keyPoints || []).map(k => `<li>${esc(k)}</li>`).join('') || '<li>None extracted.</li>'}</ul>
           <h4>Action required</h4><p>${esc(s.actionRequired)}</p>
           ${s.deadline ? `<h4>Deadline</h4><p>${esc(s.deadline)}</p>` : ''}
-          <div class="disc">Extracted from the email text itself. Dates are surfaced verbatim — verify before scheduling.</div>
+          ${engineNote('local')}
         </div>`;
-        store.logActivity('AI', 'Summary generated: ' + (target.subject || '').slice(0, 40));
-      }, 350);
+        store.logActivity('AI', 'Summary generated (local fallback)');
+      }
     }
 
     if (tab === 'exp') {
       genState('Explaining email…');
-      setTimeout(() => {
-        const items = ai.explain(body, name, target.subject);
-        out.innerHTML = `<div class="ai-out">${items.map(([q, a]) => `<h4>${esc(q)}</h4><p>${esc(a)}</p>`).join('')}</div>`;
+      try {
+        let items;
+        if (useGemini) {
+          const result = await ai.aiExplain(body, name, target.subject);
+          items = result.items;
+        } else {
+          await delay(300);
+          items = ai.explain(body, name, target.subject);
+        }
+        const engine = useGemini ? 'gemini' : 'local';
+        out.innerHTML = `<div class="ai-out">${items.map(([q, a]) => `<h4>${esc(q)}</h4><p>${esc(a)}</p>`).join('')}${engineNote(engine)}</div>`;
         store.logActivity('AI', 'Explanation generated');
-      }, 350);
+      } catch (err) {
+        console.warn('Gemini explain failed, using local fallback:', err.message);
+        const items = ai.explain(body, name, target.subject);
+        out.innerHTML = `<div class="ai-out">${items.map(([q, a]) => `<h4>${esc(q)}</h4><p>${esc(a)}</p>`).join('')}${engineNote('local')}</div>`;
+      }
     }
 
     if (tab === 'act') {
       genState('Extracting action items…');
-      setTimeout(() => {
+      try {
+        let items;
+        let engine;
+        if (useGemini) {
+          const result = await ai.aiExtractActions(body);
+          items = result.items;
+          engine = 'gemini';
+        } else {
+          await delay(300);
+          items = ai.extractActions(body);
+          engine = 'local';
+        }
+        out.innerHTML = `<div class="ai-out">
+          ${items.length
+            ? items.map(i => `<div class="action"><span>☐</span><div>${esc(i.task)}<div class="due">${esc(i.due)}</div></div></div>`).join('')
+            : '<p>No action items detected in this email.</p>'}
+          ${engineNote(engine)}
+        </div>`;
+        store.logActivity('AI', 'Action items extracted: ' + items.length);
+      } catch (err) {
+        console.warn('Gemini actions failed, using local fallback:', err.message);
         const items = ai.extractActions(body);
         out.innerHTML = `<div class="ai-out">
           ${items.length
             ? items.map(i => `<div class="action"><span>☐</span><div>${esc(i.task)}<div class="due">${esc(i.due)}</div></div></div>`).join('')
             : '<p>No action items detected in this email.</p>'}
-          <div class="disc">Detected tasks are informational only — nothing is created or scheduled automatically.</div>
+          ${engineNote('local')}
         </div>`;
-        store.logActivity('AI', 'Action items extracted: ' + items.length);
-      }, 350);
+      }
     }
 
     if (tab === 'rep') renderReplyTab();
@@ -387,16 +466,34 @@ function wireAi(el, target, body, name, email) {
       };
     });
 
-    const gen = () => {
+    const gen = async () => {
       const instr = $('#aiInstr', out)?.value.trim() || '';
       genState('Generating reply…');
-      setTimeout(() => paintDraft(ai.draftReply(body, name.split(' ')[0], curTone, instr), curTone), 400);
+
+      try {
+        let draftText;
+        let engine;
+        if (useGemini) {
+          const result = await ai.aiDraftReply(body, name.split(' ')[0], curTone, instr);
+          draftText = result.text;
+          engine = 'gemini';
+        } else {
+          await delay(350);
+          draftText = ai.draftReply(body, name.split(' ')[0], curTone, instr);
+          engine = 'local';
+        }
+        paintDraft(draftText, curTone, engine);
+      } catch (err) {
+        console.warn('Gemini draft failed, using local fallback:', err.message);
+        const draftText = ai.draftReply(body, name.split(' ')[0], curTone, instr);
+        paintDraft(draftText, curTone, 'local');
+      }
     };
 
     $('#genBtn', out).onclick = gen;
     $('#aiInstr', out).onkeydown = e => { if (e.key === 'Enter') gen(); };
 
-    function paintDraft(text, tone) {
+    function paintDraft(text, tone, engine) {
       out.innerHTML = `<div class="ai-out">
         <h4>Generated draft · ${esc(tone)}</h4>
         <textarea class="reply-edit" id="draftTa" aria-label="Editable AI draft">${esc(text)}</textarea>
@@ -407,7 +504,7 @@ function wireAi(el, target, body, name, email) {
           <span class="spacer"></span>
           <button class="btn-primary btn-accent" id="useDraft" style="padding:9px 16px;font-size:13px">Open in composer</button>
         </div>
-        <div class="disc">Drafts are never sent automatically — review and edit before sending.</div>
+        ${engineNote(engine)}
       </div>`;
 
       $('#reGen', out).onclick = () => renderReplyTab();
@@ -433,4 +530,8 @@ function wireAi(el, target, body, name, email) {
   }
 
   runTab('sum'); // summary is the default view on open
+}
+
+function delay(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }

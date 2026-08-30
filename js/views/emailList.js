@@ -1,14 +1,15 @@
 import { store } from '../store.js';
-import { config, setMode } from '../config.js';
+import { config, setMode, setGeminiApiKey, hasGeminiKey } from '../config.js';
 import { $, $$, esc, initials, fmtTime, parseAddr, toast } from '../utils.js';
 import * as gm from '../gmail.js';
 import { disconnect, reconnect } from '../oauth.js';
-import { demoRows, demoCounts, demoStar } from '../demoData.js';
+import { demoRows, demoCounts, demoStar, demoSetRead } from '../demoData.js';
 import { renderReader } from './emailReader.js';
 
 const TITLES = { INBOX: 'Inbox', STARRED: 'Starred', SENT: 'Sent', TRASH: 'Trash' };
 
 let source = [];
+let selected = new Set(); // IDs of selected emails for bulk actions
 // Assigned when the pane mounts; lets the reader and composer ask for a reload
 // without either module reaching into the other's internals.
 let refreshImpl = async () => {};
@@ -31,7 +32,10 @@ export function renderListPane(listPane, reader) {
   store.subscribe((_s, changed) => {
     // Only a folder or query change warrants refetching. Reacting to every
     // change would re-enter refresh() through its own `loading` write.
-    if (changed.includes('view') || changed.includes('query')) refresh();
+    if (changed.includes('view') || changed.includes('query')) {
+      selected.clear();
+      refresh();
+    }
     else if (changed.includes('selectedId') || changed.includes('activity')) paintImpl();
   });
 
@@ -138,21 +142,48 @@ export function renderListPane(listPane, reader) {
       ? `<div class="bulk-bar">Searching: <b>${esc(s.query)}</b><button id="clearQ" style="margin-left:auto">Clear</button></div>`
       : '';
 
+    // Bulk action bar — shown when emails are selected
+    const bulkBar = selected.size > 0
+      ? `<div class="bulk-bar bulk-actions">
+          <label class="bulk-check-label">
+            <input type="checkbox" id="bulkSelectAll" ${selected.size === source.length ? 'checked' : ''}>
+            <span>${selected.size} selected</span>
+          </label>
+          <span class="bulk-spacer"></span>
+          <button class="bulk-btn" id="bulkArchive" title="Archive selected">
+            <svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4"/><path d="M5 8v12h14V8M10 12h4"/></svg>Archive
+          </button>
+          <button class="bulk-btn" id="bulkRead" title="Mark as read">
+            <svg class="i" viewBox="0 0 24 24"><path d="M3 6h18v12H3zM3 6l9 7 9-7"/></svg>Read
+          </button>
+          <button class="bulk-btn" id="bulkUnread" title="Mark as unread">
+            <svg class="i" viewBox="0 0 24 24"><path d="M3 6h18v12H3zM3 6l9 7 9-7"/></svg>Unread
+          </button>
+          <button class="bulk-btn bulk-danger" id="bulkTrash" title="Delete selected">
+            <svg class="i" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>Delete
+          </button>
+        </div>`
+      : '';
+
     let emptyHtml = '';
     if (source.length === 0) {
       if (s.query) {
         emptyHtml = '<div class="empty"><h3>No emails found.</h3><p>Try changing your search, or use operators like from: and is:unread.</p></div>';
       } else if (s.view === 'INBOX') {
-        emptyHtml = '<div class="empty"><h3>Your inbox is clear.</h3><p>Nothing needs your attention right now.</p></div>';
+        emptyHtml = `<div class="empty">
+          <div class="empty-icon"><svg class="i" viewBox="0 0 24 24" style="width:48px;height:48px;color:var(--accent);opacity:.5"><path d="M20 6 9 17l-5-5"/></svg></div>
+          <h3>Your inbox is clear.</h3><p>Nothing needs your attention right now.</p>
+        </div>`;
       } else {
         emptyHtml = `<div class="empty"><h3>Nothing in ${esc(title.toLowerCase())}.</h3><p>Items will appear here as they arrive.</p></div>`;
       }
     }
 
-    const rows = source.map(m => {
+    const rows = source.map((m, idx) => {
       const { name } = parseAddr(m.from);
       const labels = m.labels || [];
       const starred = labels.includes('STARRED');
+      const isSelected = selected.has(m.id);
       const nMsgsHtml = m.nMsgs > 1
         ? ` <span style="color:var(--ink-3);font-weight:400">(${m.nMsgs})</span>` : '';
       const chips = [
@@ -160,7 +191,10 @@ export function renderListPane(listPane, reader) {
         (m.attachments || []).length ? `<span class="chip">${m.attachments.length} attachment${m.attachments.length > 1 ? 's' : ''}</span>` : '',
       ].join('');
 
-      return `<div class="e-row ${m.unread ? 'unread' : ''} ${m.id === s.selectedId ? 'active' : ''}" data-id="${esc(m.id)}" tabindex="0" role="button" aria-label="Open email from ${esc(name)}: ${esc(m.subject || 'no subject')}">
+      return `<div class="e-row ${m.unread ? 'unread' : ''} ${m.id === s.selectedId ? 'active' : ''} ${isSelected ? 'selected' : ''}" data-id="${esc(m.id)}" tabindex="0" role="button" aria-label="Open email from ${esc(name)}: ${esc(m.subject || 'no subject')}" style="animation-delay:${Math.min(idx * 30, 200)}ms">
+        <label class="e-check" onclick="event.stopPropagation()">
+          <input type="checkbox" data-check="${esc(m.id)}" ${isSelected ? 'checked' : ''}>
+        </label>
         <div class="e-av">${esc(initials(name))}</div>
         <div class="e-main">
           <div class="e-l1"><span class="e-from">${esc(name)}</span><span class="e-time">${esc(fmtTime(m.date))}</span></div>
@@ -176,6 +210,16 @@ export function renderListPane(listPane, reader) {
       </div>`;
     }).join('');
 
+    // Select-all checkbox only when there are emails
+    const selectAllBar = source.length > 0 && selected.size === 0
+      ? `<div class="select-all-bar">
+          <label class="bulk-check-label">
+            <input type="checkbox" id="selectAllCheck">
+            <span>Select all</span>
+          </label>
+        </div>`
+      : '';
+
     pane.innerHTML = `
       <div class="list-head">
         <h2>${esc(title)}</h2>
@@ -186,9 +230,11 @@ export function renderListPane(listPane, reader) {
         </span>
       </div>
       ${queryBar}
+      ${bulkBar}
+      ${!bulkBar && source.length > 0 ? selectAllBar : ''}
       <div class="email-list">${emptyHtml || rows}</div>`;
 
-    $('#refreshBtn', pane).onclick = () => refresh();
+    $('#refreshBtn', pane).onclick = () => { selected.clear(); refresh(); };
 
     const cq = $('#clearQ', pane);
     if (cq) {
@@ -198,6 +244,31 @@ export function renderListPane(listPane, reader) {
         if (si) si.value = '';
       };
     }
+
+    // Select-all checkbox
+    const selectAll = $('#selectAllCheck', pane) || $('#bulkSelectAll', pane);
+    if (selectAll) {
+      selectAll.onchange = () => {
+        if (selectAll.checked) {
+          source.forEach(m => selected.add(m.id));
+        } else {
+          selected.clear();
+        }
+        paintImpl();
+      };
+    }
+
+    // Individual checkboxes
+    $$('[data-check]', pane).forEach(cb => {
+      cb.onchange = () => {
+        if (cb.checked) selected.add(cb.dataset.check);
+        else selected.delete(cb.dataset.check);
+        paintImpl();
+      };
+    });
+
+    // Bulk action handlers
+    wireBulkActions(pane, refresh);
 
     // Star toggles in place — it must not open the email.
     $$('[data-star]', pane).forEach(btn => {
@@ -236,6 +307,92 @@ export function renderListPane(listPane, reader) {
     });
   }
 
+  function wireBulkActions(pane, refresh) {
+    const archiveBtn = $('#bulkArchive', pane);
+    const readBtn = $('#bulkRead', pane);
+    const unreadBtn = $('#bulkUnread', pane);
+    const trashBtn = $('#bulkTrash', pane);
+
+    if (archiveBtn) {
+      archiveBtn.onclick = async () => {
+        const ids = [...selected];
+        try {
+          if (config.demoMode) {
+            const { demoArchive } = await import('../demoData.js');
+            ids.forEach(id => { const m = source.find(r => r.id === id); if (m) demoArchive(m); });
+          } else {
+            await Promise.all(ids.map(id => gm.archive(id)));
+          }
+          toast(`${ids.length} email${ids.length > 1 ? 's' : ''} archived`);
+          store.logActivity('MAIL', `Archived ${ids.length} emails`);
+          selected.clear();
+          refresh();
+        } catch (err) {
+          toast('Archive failed. Try again.', 'err');
+        }
+      };
+    }
+
+    if (readBtn) {
+      readBtn.onclick = async () => {
+        const ids = [...selected];
+        try {
+          if (config.demoMode) {
+            ids.forEach(id => { const m = source.find(r => r.id === id); if (m) demoSetRead(m, true); });
+          } else {
+            await Promise.all(ids.map(id => gm.setRead(id, true)));
+          }
+          ids.forEach(id => patchRow(id, { unread: false }));
+          toast(`Marked ${ids.length} as read`);
+          selected.clear();
+          paintImpl();
+        } catch (err) {
+          toast('Failed to mark as read.', 'err');
+        }
+      };
+    }
+
+    if (unreadBtn) {
+      unreadBtn.onclick = async () => {
+        const ids = [...selected];
+        try {
+          if (config.demoMode) {
+            ids.forEach(id => { const m = source.find(r => r.id === id); if (m) demoSetRead(m, false); });
+          } else {
+            await Promise.all(ids.map(id => gm.setRead(id, false)));
+          }
+          ids.forEach(id => patchRow(id, { unread: true }));
+          toast(`Marked ${ids.length} as unread`);
+          selected.clear();
+          paintImpl();
+        } catch (err) {
+          toast('Failed to mark as unread.', 'err');
+        }
+      };
+    }
+
+    if (trashBtn) {
+      trashBtn.onclick = async () => {
+        const ids = [...selected];
+        if (!confirm(`Delete ${ids.length} email${ids.length > 1 ? 's' : ''}?`)) return;
+        try {
+          if (config.demoMode) {
+            const { demoTrash } = await import('../demoData.js');
+            ids.forEach(id => { const m = source.find(r => r.id === id); if (m) demoTrash(m); });
+          } else {
+            await Promise.all(ids.map(id => gm.trash(id)));
+          }
+          toast(`${ids.length} email${ids.length > 1 ? 's' : ''} deleted`);
+          store.logActivity('MAIL', `Deleted ${ids.length} emails`);
+          selected.clear();
+          refresh();
+        } catch (err) {
+          toast('Delete failed. Try again.', 'err');
+        }
+      };
+    }
+  }
+
   function paintActivity(pane) {
     const acts = store.state.activity;
     const icons = { AI: '✦', SEND: '↑', MAIL: '•', EXIT: '×' };
@@ -258,6 +415,9 @@ export function renderListPane(listPane, reader) {
 
   function paintSettings(pane) {
     const p = store.state.profile;
+    const geminiKey = config.geminiApiKey || '';
+    const geminiStatus = hasGeminiKey();
+
     pane.innerHTML = `
       <div class="list-head"><h2>Settings</h2></div>
       <div class="email-list" style="padding:18px 16px;display:flex;flex-direction:column;gap:20px">
@@ -272,13 +432,37 @@ export function renderListPane(listPane, reader) {
             ? `<p style="font-size:12.5px;color:var(--ink-3);margin-top:4px">${Number(p.messagesTotal).toLocaleString()} messages · ${Number(p.threadsTotal || 0).toLocaleString()} threads</p>`
             : ''}
         </div>
+
+        <div class="settings-section">
+          <div class="sb-h" style="padding-left:0">
+            <svg class="i" viewBox="0 0 24 24" style="width:14px;height:14px;vertical-align:-2px;color:var(--accent)"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>
+            AI Configuration
+          </div>
+          <p style="font-size:13px;color:var(--ink-2);margin:6px 0 12px">
+            Connect a Google Gemini API key to enable powerful AI-powered email analysis, summarization, and reply drafting. Without a key, the app uses a basic on-device text analysis engine.
+          </p>
+          <div class="gemini-key-row">
+            <div class="gemini-key-input-wrap">
+              <input id="geminiKeyInput" type="password" placeholder="Enter your Gemini API key" value="${esc(geminiKey)}"
+                class="gemini-key-input" autocomplete="off" spellcheck="false">
+              <button class="ghost-btn" id="toggleKeyVis" style="padding:4px 8px;font-size:11px">Show</button>
+            </div>
+            <button class="btn-primary" id="saveGeminiKey" style="padding:8px 16px;font-size:13px">Save key</button>
+          </div>
+          <div class="gemini-status" style="margin-top:8px">
+            ${geminiStatus
+              ? '<span style="color:var(--ok);font-size:12.5px">✓ Gemini AI is active — your emails will be analyzed by AI.</span>'
+              : '<span style="color:var(--ink-3);font-size:12.5px">No API key configured — using on-device analysis.</span>'}
+          </div>
+          <p style="font-size:12px;color:var(--ink-3);margin-top:8px">
+            Get a free API key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline">Google AI Studio</a>. 
+            Your key is stored locally in your browser only.
+          </p>
+        </div>
+
         <div>
           <div class="sb-h" style="padding-left:0">Appearance</div>
           <button class="btn-outline" id="setTheme" style="margin-top:8px">Toggle light / dark theme</button>
-        </div>
-        <div>
-          <div class="sb-h" style="padding-left:0">AI preferences</div>
-          <p style="font-size:13px;color:var(--ink-2);margin:6px 0">All analysis runs on-device. No email content ever leaves your browser.</p>
         </div>
         <div>
           <div class="sb-h" style="padding-left:0">Keyboard shortcuts</div>
@@ -315,6 +499,35 @@ export function renderListPane(listPane, reader) {
       } catch (err) {
         toast('Failed to sign out.', 'err');
       }
+    };
+
+    // Gemini API key handlers
+    const keyInput = $('#geminiKeyInput', pane);
+    const toggleBtn = $('#toggleKeyVis', pane);
+    const saveBtn = $('#saveGeminiKey', pane);
+
+    toggleBtn.onclick = () => {
+      const isPass = keyInput.type === 'password';
+      keyInput.type = isPass ? 'text' : 'password';
+      toggleBtn.textContent = isPass ? 'Hide' : 'Show';
+    };
+
+    saveBtn.onclick = () => {
+      const key = keyInput.value.trim();
+      setGeminiApiKey(key);
+      if (key) {
+        toast('Gemini API key saved! AI features are now active.');
+        store.logActivity('AI', 'Gemini API key configured');
+      } else {
+        toast('API key removed. Using on-device analysis.');
+        store.logActivity('AI', 'Gemini API key removed');
+      }
+      // Re-render settings to update status
+      paintSettings(pane);
+    };
+
+    keyInput.onkeydown = e => {
+      if (e.key === 'Enter') { e.preventDefault(); saveBtn.click(); }
     };
   }
 }

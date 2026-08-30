@@ -1,4 +1,177 @@
-// Fully on-device intelligence. Extractive, deterministic, derived from real email content.
+// AI Engine — Gemini API integration with on-device fallback.
+// When a Gemini API key is configured, uses Google's Gemini 2.0 Flash model
+// for high-quality, contextual analysis. Falls back to the local extractive
+// engine when no key is set or when the API call fails.
+
+import { config } from './config.js';
+
+// ─── Gemini API ────────────────────────────────────────────────────────────────
+
+const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+async function callGemini(prompt, maxTokens = 1024) {
+  if (!config.geminiApiKey) throw new Error('NO_KEY');
+
+  const res = await fetch(`${GEMINI_URL}?key=${encodeURIComponent(config.geminiApiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        maxOutputTokens: maxTokens,
+        temperature: 0.4,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const msg = err?.error?.message || `Gemini API error (HTTP ${res.status})`;
+    throw new Error(msg);
+  }
+
+  const data = await res.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  if (!text) throw new Error('Gemini returned an empty response.');
+  return text;
+}
+
+/** Try to parse a JSON block from Gemini's response (it often wraps in ```json). */
+function parseJsonResponse(raw) {
+  const cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+  return JSON.parse(cleaned);
+}
+
+// ─── Gemini-powered AI functions ───────────────────────────────────────────────
+
+export async function aiSummarize(text) {
+  const prompt = `You are an expert email analyst. Analyze the following email and return a JSON object with exactly these keys:
+- "summary": A clear, concise 2-3 sentence summary of what the email is about.
+- "keyPoints": An array of 2-4 key points or important details (each a short string).
+- "actionRequired": A string — if the sender asks for a response or action, describe it clearly. If not, say "No action required."
+- "deadline": A string with any deadline or date mentioned, or null if none.
+
+Be specific and contextual. Don't be generic.
+
+Email text:
+"""
+${text.slice(0, 6000)}
+"""
+
+Respond with ONLY valid JSON, no markdown formatting.`;
+
+  const raw = await callGemini(prompt, 600);
+  const parsed = parseJsonResponse(raw);
+  return {
+    summary: parsed.summary || 'No summary generated.',
+    keyPoints: Array.isArray(parsed.keyPoints) ? parsed.keyPoints : [],
+    actionRequired: parsed.actionRequired || 'No action required.',
+    deadline: parsed.deadline || null,
+    engine: 'gemini',
+  };
+}
+
+export async function aiExplain(text, from, subject) {
+  const prompt = `You are a helpful email assistant. A user received an email from "${from}" with subject "${subject}". 
+Explain this email in plain language. Return a JSON array of [question, answer] pairs covering:
+1. "What is this about?" — summarize in 1-2 clear sentences
+2. "What does the sender want?" — describe any requests or expectations
+3. "Important dates" — any dates, deadlines, or time-sensitive info
+4. "Potential risks" — any red flags, urgency language, or things to verify
+5. "Suggested next action" — what should the user do next?
+
+Be specific to THIS email's content. Don't be vague.
+
+Email text:
+"""
+${text.slice(0, 6000)}
+"""
+
+Respond with ONLY a valid JSON array of [question, answer] pairs, no markdown.`;
+
+  const raw = await callGemini(prompt, 700);
+  const parsed = parseJsonResponse(raw);
+  return { items: parsed, engine: 'gemini' };
+}
+
+export async function aiExtractActions(text) {
+  const prompt = `You are an expert at extracting action items from emails. Analyze the following email and extract all tasks, to-dos, requests, and commitments.
+
+Return a JSON array of objects, each with:
+- "task": A clear, actionable description of the task
+- "due": The deadline or timing if mentioned, or "No explicit deadline"
+
+If there are no action items, return an empty array [].
+
+Email text:
+"""
+${text.slice(0, 6000)}
+"""
+
+Respond with ONLY valid JSON array, no markdown.`;
+
+  const raw = await callGemini(prompt, 500);
+  const parsed = parseJsonResponse(raw);
+  return {
+    items: Array.isArray(parsed) ? parsed.slice(0, 8) : [],
+    engine: 'gemini',
+  };
+}
+
+export async function aiDraftReply(text, fromName, tone, instruction) {
+  const toneDesc = {
+    Professional: 'professional and polished, business-appropriate',
+    Friendly: 'warm, friendly, and casual but not unprofessional',
+    Formal: 'very formal and respectful, using proper salutations',
+    Concise: 'extremely brief and to-the-point, minimal words',
+  };
+
+  const toneGuide = toneDesc[tone] || toneDesc.Professional;
+  const instrPart = instruction
+    ? `The user wants to specifically: ${instruction}`
+    : 'Compose a relevant reply addressing the main points of the email.';
+
+  const prompt = `You are an expert email writer. Draft a reply to the following email.
+
+Tone: ${toneGuide}
+Sender name: ${fromName}
+${instrPart}
+
+Original email:
+"""
+${text.slice(0, 4000)}
+"""
+
+Write ONLY the reply text (no subject line, no explanations). Include a greeting and sign-off appropriate to the tone. The reply should feel natural and specific to the email's content.`;
+
+  const raw = await callGemini(prompt, 500);
+  return { text: raw.trim(), engine: 'gemini' };
+}
+
+export async function aiPolish(text, mode) {
+  const modeDesc = {
+    improve: 'Improve the writing quality — fix grammar, improve clarity, make it flow better. Keep the same tone and length.',
+    concise: 'Make this much more concise — cut unnecessary words, keep only essential information. Roughly halve the length.',
+    professional: 'Rewrite in a professional, business-appropriate tone. Add a proper greeting and sign-off if missing.',
+    friendly: 'Rewrite in a warm, friendly, casual tone. Make it feel personable and approachable.',
+  };
+
+  const prompt = `${modeDesc[mode] || modeDesc.improve}
+
+Original text:
+"""
+${text.slice(0, 4000)}
+"""
+
+Write ONLY the rewritten text, nothing else.`;
+
+  const raw = await callGemini(prompt, 600);
+  return { text: raw.trim(), engine: 'gemini' };
+}
+
+// ─── Local / on-device fallback engine ─────────────────────────────────────────
+// Extractive, deterministic, derived from real email content.
 // No API keys needed — nothing leaves the browser.
 
 const STOP = new Set(
@@ -42,6 +215,7 @@ export function summarize(text) {
       ? 'Yes — the sender appears to request a response or action.'
       : 'No explicit request detected.',
     deadline: dates[0] || null,
+    engine: 'local',
   };
 }
 

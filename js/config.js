@@ -7,6 +7,8 @@ export const config = {
   supabaseUrl: 'https://yqyaswbbztepvzwzbtuf.supabase.co',
   supabaseKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlxeWFzd2JienRlcHZ6d3pidHVmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc5OTMxNjMsImV4cCI6MjEwMzU2OTE2M30.U8acOw-4XE4lcm3zPu2vjoF6yT6ZoVFjiUg4DqW0djk',
   demoMode: localStorage.getItem('veltrix.mode') === 'demo',
+  // Gemini API key for real AI assistance. Stored in localStorage for persistence.
+  geminiApiKey: localStorage.getItem('veltrix.geminiKey') || '',
   scopes: [
     'https://www.googleapis.com/auth/gmail.modify',
     'https://www.googleapis.com/auth/gmail.send',
@@ -21,4 +23,17 @@ export function setClientId(id) {
 export function setMode(m) {
   config.demoMode = m === 'demo';
   localStorage.setItem('veltrix.mode', m);
+}
+
+export function setGeminiApiKey(key) {
+  config.geminiApiKey = (key || '').trim();
+  if (config.geminiApiKey) {
+    localStorage.setItem('veltrix.geminiKey', config.geminiApiKey);
+  } else {
+    localStorage.removeItem('veltrix.geminiKey');
+  }
+}
+
+export function hasGeminiKey() {
+  return !!(config.geminiApiKey && config.geminiApiKey.length > 10);
 }

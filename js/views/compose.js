@@ -117,22 +117,65 @@ export function openCompose({
     store.logActivity('AI', note);
   };
 
+  const useGemini = () => !!(config.geminiApiKey && config.geminiApiKey.length > 10);
+
   $$('[data-mode]', el).forEach(b => {
-    b.onclick = () => {
+    b.onclick = async () => {
       const cur = bodyEl.value.trim();
       if (!cur) return showErr('Write something first, then let AI refine it.');
       clearErr();
-      applyAi(ai.polish(cur, b.dataset.mode), `Rewrote draft: ${b.textContent.toLowerCase()}`);
+      const originalText = b.textContent;
+      b.disabled = true;
+      b.textContent = 'Refining…';
+      try {
+        let resultText;
+        if (useGemini()) {
+          const res = await ai.aiPolish(cur, b.dataset.mode);
+          resultText = res.text;
+        } else {
+          resultText = ai.polish(cur, b.dataset.mode);
+        }
+        applyAi(resultText, `Rewrote draft: ${originalText.toLowerCase()}`);
+      } catch (err) {
+        console.warn('Gemini polish failed, falling back to local:', err);
+        const resultText = ai.polish(cur, b.dataset.mode);
+        applyAi(resultText, `Rewrote draft (fallback): ${originalText.toLowerCase()}`);
+      } finally {
+        b.disabled = false;
+        b.textContent = originalText;
+      }
     };
   });
 
-  const write = () => {
+  const write = async () => {
     const instr = $('#cAiInstr', el).value.trim();
     if (!instr) return showErr('Describe what the email should say.');
     if (bodyEl.value.trim() && !confirm('Replace your current message with the generated one?')) return;
     clearErr();
     const toName = ($('#cTo', el).value.split('@')[0] || 'there').split(/[.\-_+]/)[0];
-    applyAi(ai.draftReply('', toName, 'Professional', instr), 'Composed with AI assist');
+    
+    const writeBtn = $('#cAiWrite', el);
+    const originalText = writeBtn.textContent;
+    writeBtn.disabled = true;
+    writeBtn.textContent = 'Writing…';
+
+    try {
+      let resultText;
+      if (useGemini()) {
+        const res = await ai.aiDraftReply('', toName, 'Professional', instr);
+        resultText = res.text;
+      } else {
+        resultText = ai.draftReply('', toName, 'Professional', instr);
+      }
+      applyAi(resultText, 'Composed with AI assist');
+    } catch (err) {
+      console.warn('Gemini compose failed, falling back to local:', err);
+      const resultText = ai.draftReply('', toName, 'Professional', instr);
+      applyAi(resultText, 'Composed with AI assist (fallback)');
+    } finally {
+      writeBtn.disabled = false;
+      writeBtn.textContent = originalText;
+    }
   };
   $('#cAiWrite', el).onclick = write;
   $('#cAiInstr', el).onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); write(); } };

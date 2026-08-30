@@ -16,6 +16,10 @@ const NAV = [
 
 const isMobile = () => innerWidth <= 760;
 
+// Auto-refresh interval ID — cleared on disconnect / page leave.
+let autoRefreshId = null;
+const AUTO_REFRESH_MS = 120_000; // 2 minutes
+
 export function renderShell(root) {
   const modeClass = config.demoMode ? 'demo' : 'live';
   const modeLabel = config.demoMode ? 'Demo mode' : 'Live · Gmail';
@@ -211,11 +215,33 @@ export function renderShell(root) {
     }
   };
 
-  store.subscribe(() => paintNav());
+  /* ---- page title with unread count ---- */
+  function updatePageTitle() {
+    const c = store.state.counts;
+    const unread = c.INBOX ? parseInt(c.INBOX, 10) : 0;
+    const prefix = unread > 0 ? `(${unread > 999 ? '999+' : unread}) ` : '';
+    document.title = `${prefix}Veltrix AI — ${store.state.view === 'SETTINGS' ? 'Settings' : store.state.view === 'ACTIVITY' ? 'Activity' : store.state.view.charAt(0) + store.state.view.slice(1).toLowerCase()}`;
+  }
+
+  store.subscribe((_s, changed) => {
+    paintNav();
+    if (changed.includes('counts') || changed.includes('view')) updatePageTitle();
+  });
   paintNav();
+  updatePageTitle();
 
   renderListPane($('#listPane'), $('#reader'));
   renderReader($('#reader'), null);
+
+  /* ---- auto-refresh ---- */
+  if (autoRefreshId) clearInterval(autoRefreshId);
+  autoRefreshId = setInterval(() => {
+    // Only auto-refresh when viewing a mail folder (not Settings/Activity) and no email is open
+    const v = store.state.view;
+    if (!store.state.selectedId && !['ACTIVITY', 'SETTINGS'].includes(v)) {
+      refreshList();
+    }
+  }, AUTO_REFRESH_MS);
 }
 
 function paintNav() {
